@@ -48,7 +48,7 @@ final class SessionModel: ObservableObject {
 
     private var decisions: [String: Decision] = [:]
     private var sourceKey = ""
-    private var accessedURL: URL?
+    private var accessed: [URL] = []
     private var toastWork: DispatchWorkItem?
 
     init() {
@@ -72,7 +72,66 @@ final class SessionModel: ObservableObject {
     // MARK: - 來源（記憶卡）
 
     func chooseSource() {
-        FolderPicker.shared.present { [weak self] url in self?.open(url) }
+        FolderPicker.shared.presentSource { [weak self] urls in self?.openPicked(urls) }
+    }
+
+    /// 選擇器可能回傳一個資料夾，或使用者勾選的多張相片。
+    private func openPicked(_ urls: [URL]) {
+        let folders = urls.filter(isFolder)
+        if let folder = folders.first, folders.count == urls.count {
+            open(folder)
+        } else {
+            openFiles(urls.filter { !isFolder($0) })
+        }
+    }
+
+    private func isFolder(_ url: URL) -> Bool {
+        if url.hasDirectoryPath { return true }
+        let ok = url.startAccessingSecurityScopedResource()
+        defer { if ok { url.stopAccessingSecurityScopedResource() } }
+        return (try? url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true
+    }
+
+    /// 開啟直接勾選的相片（不經過資料夾）。
+    private func openFiles(_ files: [URL]) {
+        guard !files.isEmpty else { return }
+        saves.flush()
+        showDestinations = false
+        replaceAccess(with: files)
+
+        let folder = files[0].deletingLastPathComponent()
+        sourceName = Self.cardName(for: folder)
+        sourceKey = ProgressStore.key(for: folder)
+        loadingCount = files.count
+        withAnimation(.easeInOut(duration: 0.25)) { phase = .loading }
+
+        Task.detached(priority: .userInitiated) { [weak self] in
+            let found = FolderScanner.items(from: files)
+            await self?.finishLoading(found)
+        }
+    }
+
+    /// 取得新來源的存取權；舊來源可能還有相片正在寫入，稍後再釋放。
+    private func replaceAccess(with urls: [URL]) {
+        let previous = accessed
+        accessed = urls.filter { $0.startAccessingSecurityScopedResource() }
+        let keep = Set(urls)
+        let release = previous.filter { !keep.contains($0) }
+        if !release.isEmpty {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 30) {
+                release.forEach { $0.stopAccessingSecurityScopedResource() }
+            }
+        }
+    }
+
+    /// 記憶卡名稱：資料夾在 DCIM 底下時，用 DCIM 上一層（卡的名稱）。
+    private static func cardName(for folder: URL) -> String {
+        var url = folder
+        while url.pathComponents.count > 1 {
+            if url.lastPathComponent.uppercased() == "DCIM" { return url.deletingLastPathComponent().lastPathComponent }
+            url = url.deletingLastPathComponent()
+        }
+        return folder.lastPathComponent
     }
 
     func resumeLast() {
@@ -89,13 +148,7 @@ final class SessionModel: ObservableObject {
         saves.flush()
         showDestinations = false
 
-        let previous = accessedURL
-        let ok = url.startAccessingSecurityScopedResource()
-        accessedURL = ok ? url : nil
-        // 舊來源可能還有相片正在寫入，稍後再釋放存取權。
-        if let previous, previous != url {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 30) { previous.stopAccessingSecurityScopedResource() }
-        }
+        replaceAccess(with: [url])
 
         guard (try? url.checkResourceIsReachable()) == true else {
             alert = AlertInfo(title: "找不到「\(url.lastPathComponent)」", message: "請確認記憶卡已經接上 iPad，或重新選擇記憶卡。")
@@ -103,8 +156,8 @@ final class SessionModel: ObservableObject {
             return
         }
 
-        var name = url.lastPathComponent
-        if name.uppercased() == "DCIM" { name = url.deletingLastPathComponent().lastPathComponent }
+        let name = url.lastPathComponent.uppercased() == "DCIM" ? url.deletingLastPathComponent().lastPathComponent
+            : Self.cardName(for: url)
         sourceName = name
         if let bookmark = try? url.bookmarkData() {
             lastSource = LastSource(name: name, bookmark: bookmark)

@@ -10,18 +10,21 @@
 
 ## 下載
 
-到 [Releases](https://github.com/PACO630/CardPick/releases/latest) 下載 `CardPick-v1.0.ipa`（未簽名），用 Sideloadly 或 AltStore 等工具以你的 Apple ID 簽名後安裝到 iPad。
+到 [Releases](https://github.com/PACO630/CardPick/releases/latest) 下載最新版的 `CardPick-v*.ipa`（未簽名），用 Sideloadly 或 AltStore 等工具以你的 Apple ID 簽名後安裝到 iPad。
 
 ## 功能介紹
 
 ### 連接記憶卡
 
-用讀卡機把記憶卡接上 iPad，點「選擇記憶卡」，在「檔案」裡選記憶卡或卡上的 DCIM 資料夾。
+用讀卡機把記憶卡接上 iPad，點「選擇記憶卡」，有兩種選法：
+
+1. **打開整個資料夾**：進到卡上的 `DCIM` 或 `100XXXXX` 資料夾，什麼都不勾，直接按右上角「打開」。
+2. **勾選相片**：進到相片所在的資料夾，按「全選」或一張張勾選，再按「打開」。在 iPadOS 16 上，如果第 1 種按了「打開」沒有反應，請改用這種。
 
 - 會讀取資料夾裡所有的 JPG、HEIC、PNG、TIFF 和各家相機的 RAW 檔。
 - 同名的 RAW 和 JPG（例如 `IMG_0421.CR3` 與 `IMG_0421.JPG`）合成一張卡片，上方會標示「RAW+JPG」。
 - 會記住每張卡挑到哪裡，下次打開同一張卡，從還沒看過的那張繼續。
-- 「繼續挑選」可以直接回到上次的記憶卡。
+- 「繼續挑選」可以直接回到上次打開的資料夾（用勾選相片的方式開啟時不會記住）。
 
 ![開始畫面](docs/images/start.jpg)
 

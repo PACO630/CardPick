@@ -3,28 +3,36 @@ import Foundation
 /// 掃描記憶卡（或任何資料夾）裡的相片，把同名的 RAW + JPG 合併成一張。
 enum FolderScanner {
     static func scan(root: URL, progress: @escaping (Int) -> Void) -> [PhotoItem] {
-        let fm = FileManager.default
-        let rootPath = root.resolvingSymlinksInPath().standardizedFileURL.path
-        guard let enumerator = fm.enumerator(at: root,
-                                             includingPropertiesForKeys: [.isRegularFileKey],
-                                             options: [.skipsHiddenFiles, .skipsPackageDescendants]) else {
+        guard let enumerator = FileManager.default.enumerator(at: root,
+                                                              includingPropertiesForKeys: [.isRegularFileKey],
+                                                              options: [.skipsHiddenFiles, .skipsPackageDescendants]) else {
             return []
         }
+        var files: [URL] = []
+        for case let url as URL in enumerator where FileTypes.isPhoto(url) {
+            files.append(url)
+            if files.count % 25 == 0 { progress(files.count) }
+        }
+        progress(files.count)
+        return group(files, root: root)
+    }
 
+    /// 使用者直接勾選的相片檔案。
+    static func items(from files: [URL]) -> [PhotoItem] {
+        let photos = files.filter(FileTypes.isPhoto)
+        guard let first = photos.first else { return [] }
+        return group(photos, root: first.deletingLastPathComponent())
+    }
+
+    private static func group(_ files: [URL], root: URL) -> [PhotoItem] {
+        let rootPath = root.resolvingSymlinksInPath().standardizedFileURL.path
         var groups: [String: [URL]] = [:]
-        var found = 0
-        for case let url as URL in enumerator {
-            guard FileTypes.isPhoto(url) else { continue }
+        for url in files {
             let full = url.resolvingSymlinksInPath().standardizedFileURL.path
             let relative = full.hasPrefix(rootPath + "/") ? String(full.dropFirst(rootPath.count + 1)) : url.lastPathComponent
             let key = (relative as NSString).deletingPathExtension.lowercased()
-            if groups[key] == nil {
-                found += 1
-                if found % 25 == 0 { progress(found) }
-            }
             groups[key, default: []].append(url)
         }
-        progress(found)
 
         let keys = groups.keys.sorted { $0.localizedStandardCompare($1) == .orderedAscending }
         return keys.compactMap { key in
