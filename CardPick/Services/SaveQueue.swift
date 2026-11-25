@@ -1,5 +1,6 @@
 import Foundation
 import Photos
+import UIKit
 
 enum SaveOutcome {
     case asset(String)
@@ -20,8 +21,9 @@ enum SaveError: LocalizedError {
     }
 }
 
-/// 右滑後不會立刻寫入，而是等幾秒再存。
-/// 這段時間內按「復原」只要取消就好，不必刪除已存的照片（刪照片時 iOS 會跳出確認視窗）。
+/// 右滑後先記下來，等離開這張卡（回開始畫面、換卡、切到別的 App）時才一次寫入。
+/// 挑選時按「復原」都只是取消，不會因為要刪除「照片」裡的相片而跳出系統確認視窗。
+/// 寫入成功的會記在 ProgressStore，App 中途被關掉時，下次打開會補存。
 @MainActor
 final class SaveQueue {
     private enum State { case pending, committing, done, failed }
@@ -29,37 +31,64 @@ final class SaveQueue {
     private final class Job {
         let item: PhotoItem
         let destination: Destination
+        let sourceKey: String
         var state: State = .pending
         var outcome: SaveOutcome?
-        var work: DispatchWorkItem?
         var revertRequested = false
 
-        init(item: PhotoItem, destination: Destination) {
+        init(item: PhotoItem, destination: Destination, sourceKey: String) {
             self.item = item
             self.destination = destination
+            self.sourceKey = sourceKey
         }
     }
 
-    var delay: TimeInterval = 3
     var onMessage: ((String) -> Void)?
 
     private var jobs: [UUID: Job] = [:]
+    private var order: [UUID] = []
+    private var running = false
+    private var idleWaiters: [() -> Void] = []
+    private var backgroundTask: UIBackgroundTaskIdentifier = .invalid
 
-    func enqueue(_ item: PhotoItem, to destination: Destination) -> UUID {
+    /// 加入一張要儲存的相片；同一張已經在排隊或寫入中時，回傳原本那一筆。
+    func enqueue(_ item: PhotoItem, to destination: Destination, sourceKey: String) -> UUID {
+        if let existing = jobs.first(where: { $0.value.sourceKey == sourceKey && $0.value.item.id == item.id
+            && ($0.value.state == .pending || $0.value.state == .committing) }) {
+            return existing.key
+        }
         let id = UUID()
-        let job = Job(item: item, destination: destination)
-        jobs[id] = job
-        let work = DispatchWorkItem { [weak self] in self?.commit(id) }
-        job.work = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
+        jobs[id] = Job(item: item, destination: destination, sourceKey: sourceKey)
+        order.append(id)
         return id
     }
 
-    /// 立刻寫入所有還在等待的相片。
-    func flush() {
-        for (id, job) in jobs where job.state == .pending {
-            job.work?.cancel()
-            commit(id)
+    var hasPending: Bool { jobs.values.contains { $0.state == .pending || $0.state == .committing } }
+
+    /// 依序寫入目前排隊的相片；全部完成後呼叫 then。
+    func flush(then done: (() -> Void)? = nil) {
+        if let done { idleWaiters.append(done) }
+        guard !running else { return }
+        let batch = order.filter { jobs[$0]?.state == .pending }
+        guard !batch.isEmpty else {
+            finishIdle()
+            return
+        }
+        running = true
+        // 切到背景時向系統要一點時間把相片存完。
+        backgroundTask = UIApplication.shared.beginBackgroundTask(withName: "CardPick.save") { [weak self] in
+            self?.endBackgroundTask()
+        }
+        Task {
+            for id in batch { await commit(id) }
+            running = false
+            endBackgroundTask()
+            // 寫入期間又有新的相片排進來（例如中途回到 App 繼續挑）就再跑一輪。
+            if order.contains(where: { jobs[$0]?.state == .pending }) && !idleWaiters.isEmpty {
+                flush()
+            } else {
+                finishIdle()
+            }
         }
     }
 
@@ -67,34 +96,51 @@ final class SaveQueue {
         guard let job = jobs[id] else { return }
         switch job.state {
         case .pending:
-            job.work?.cancel()
-            jobs[id] = nil
+            drop(id)
         case .committing:
             job.revertRequested = true
         case .done:
-            jobs[id] = nil
+            drop(id)
+            ProgressStore.unmarkSaved(job.sourceKey, job.item.id)
             if let outcome = job.outcome { remove(outcome) }
         case .failed:
-            jobs[id] = nil
+            drop(id)
         }
     }
 
-    private func commit(_ id: UUID) {
+    private func drop(_ id: UUID) {
+        jobs[id] = nil
+        order.removeAll { $0 == id }
+    }
+
+    private func finishIdle() {
+        let waiters = idleWaiters
+        idleWaiters = []
+        waiters.forEach { $0() }
+    }
+
+    private func endBackgroundTask() {
+        guard backgroundTask != .invalid else { return }
+        UIApplication.shared.endBackgroundTask(backgroundTask)
+        backgroundTask = .invalid
+    }
+
+    private func commit(_ id: UUID) async {
         guard let job = jobs[id], job.state == .pending else { return }
         job.state = .committing
-        Task {
-            do {
-                let outcome = try await Saver.save(job.item, to: job.destination)
-                job.outcome = outcome
-                job.state = .done
-                if job.revertRequested {
-                    jobs[id] = nil
-                    remove(outcome)
-                }
-            } catch {
-                job.state = .failed
-                onMessage?("「\(job.item.displayName)」沒有存成功：\(error.localizedDescription)")
+        do {
+            let outcome = try await Saver.save(job.item, to: job.destination)
+            job.outcome = outcome
+            job.state = .done
+            ProgressStore.markSaved(job.sourceKey, job.item.id)
+            if job.revertRequested {
+                drop(id)
+                ProgressStore.unmarkSaved(job.sourceKey, job.item.id)
+                remove(outcome)
             }
+        } catch {
+            job.state = .failed
+            onMessage?("「\(job.item.displayName)」沒有存成功：\(error.localizedDescription)")
         }
     }
 

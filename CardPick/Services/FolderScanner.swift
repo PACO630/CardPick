@@ -17,13 +17,6 @@ enum FolderScanner {
         return group(files, root: root)
     }
 
-    /// 使用者直接勾選的相片檔案。
-    static func items(from files: [URL]) -> [PhotoItem] {
-        let photos = files.filter(FileTypes.isPhoto)
-        guard let first = photos.first else { return [] }
-        return group(photos, root: first.deletingLastPathComponent())
-    }
-
     private static func group(_ files: [URL], root: URL) -> [PhotoItem] {
         let rootPath = root.resolvingSymlinksInPath().standardizedFileURL.path
         var groups: [String: [URL]] = [:]

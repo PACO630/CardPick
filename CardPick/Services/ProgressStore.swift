@@ -36,6 +36,49 @@ enum ProgressStore {
     }
 
     static func clear(_ key: String) {
-        queue.sync { try? FileManager.default.removeItem(at: file(key)) }
+        queue.sync {
+            try? FileManager.default.removeItem(at: file(key))
+            try? FileManager.default.removeItem(at: savedFile(key))
+        }
+    }
+
+    // MARK: - 已經真正寫入的相片（用來補存 App 被關掉前還沒存的）
+
+    private static func savedFile(_ key: String) -> URL { folder.appendingPathComponent("\(key)-saved.json") }
+
+    private static func readSaved(_ key: String) -> Set<String> {
+        guard let data = try? Data(contentsOf: savedFile(key)),
+              let ids = try? JSONDecoder().decode([String].self, from: data) else { return [] }
+        return Set(ids)
+    }
+
+    private static func writeSaved(_ key: String, _ ids: Set<String>) {
+        guard let data = try? JSONEncoder().encode(ids.sorted()) else { return }
+        try? data.write(to: savedFile(key), options: .atomic)
+    }
+
+    static func loadSaved(_ key: String) -> Set<String> {
+        queue.sync { readSaved(key) }
+    }
+
+    /// 舊版沒有「已存入」紀錄。第一次用新版開啟時，把當時決定要存的都當作已經存好，避免重複存。
+    static func migrateSavedRecord(_ key: String) {
+        queue.sync {
+            guard !FileManager.default.fileExists(atPath: savedFile(key).path) else { return }
+            var legacy: Set<String> = []
+            if let data = try? Data(contentsOf: file(key)),
+               let decisions = try? JSONDecoder().decode([String: Decision].self, from: data) {
+                legacy = Set(decisions.filter { $0.value == .save }.map(\.key))
+            }
+            writeSaved(key, legacy)
+        }
+    }
+
+    static func markSaved(_ key: String, _ id: String) {
+        queue.async { var ids = readSaved(key); ids.insert(id); writeSaved(key, ids) }
+    }
+
+    static func unmarkSaved(_ key: String, _ id: String) {
+        queue.async { var ids = readSaved(key); ids.remove(id); writeSaved(key, ids) }
     }
 }

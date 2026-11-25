@@ -10,26 +10,26 @@ final class FolderPicker: NSObject, UIDocumentPickerDelegate {
 
     /// 只挑一個資料夾（儲存位置）。
     func present(completion: @escaping (URL) -> Void) {
-        present(types: [.folder], multiple: false) { urls in
+        present(types: [.folder], multiple: false, asCopy: false) { urls in
             if let url = urls.first { completion(url) }
         }
     }
 
-    /// 挑記憶卡：可以打開整個資料夾，也可以直接勾選相片。
-    /// iPadOS 16 在外接記憶卡上有時無法用「打開」選資料夾，勾選相片是保底的方式。
+    /// 挑記憶卡上的相片：勾選後由系統複製進 App（asCopy）。
+    /// iPadOS 16 對外接記憶卡用「直接開啟」會一直轉圈，複製的方式最可靠。
     func presentSource(completion: @escaping ([URL]) -> Void) {
-        var types: [UTType] = [.folder, .image]
+        var types: [UTType] = [.image]
         if let raw = UTType("public.camera-raw-image") { types.append(raw) }
-        present(types: types, multiple: true, completion: completion)
+        present(types: types, multiple: true, asCopy: true, completion: completion)
     }
 
-    private func present(types: [UTType], multiple: Bool, completion: @escaping ([URL]) -> Void) {
+    private func present(types: [UTType], multiple: Bool, asCopy: Bool, completion: @escaping ([URL]) -> Void) {
         let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
         let window = scenes.flatMap(\.windows).first(where: \.isKeyWindow) ?? scenes.first?.windows.first
         guard var top = window?.rootViewController else { return }
         while let presented = top.presentedViewController { top = presented }
 
-        let picker = UIDocumentPickerViewController(forOpeningContentTypes: types, asCopy: false)
+        let picker = UIDocumentPickerViewController(forOpeningContentTypes: types, asCopy: asCopy)
         picker.allowsMultipleSelection = multiple
         picker.shouldShowFileExtensions = true
         picker.delegate = self

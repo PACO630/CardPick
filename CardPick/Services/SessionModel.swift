@@ -56,6 +56,46 @@ final class SessionModel: ObservableObject {
         recentFolders = Self.loadJSON([FolderRef].self, "recentFolders") ?? []
         lastSource = Self.loadJSON(LastSource.self, "lastSource")
         saves.onMessage = { [weak self] message in self?.showToast(message) }
+        // 只保留「繼續挑選」會用到的那一次匯入；其餘的先補存沒存到的相片，再刪掉。
+        var keep: URL?
+        if let last = lastSource {
+            var stale = false
+            keep = try? URL(resolvingBookmarkData: last.bookmark, bookmarkDataIsStale: &stale)
+        }
+        cleanupImports(keep: keep)
+    }
+
+    /// 清掉舊的匯入資料夾。裡面如果還有右滑了、卻還沒真正存進去的相片（例如 App 被關掉），先存完再刪。
+    private func cleanupImports(keep: URL?) {
+        Task {
+            let leftovers = await Task.detached(priority: .utility) { () -> [(URL, String, [PhotoItem])] in
+                ImportStore.folders(except: keep).map { folder in
+                    let key = ProgressStore.key(for: folder)
+                    let unsaved = Self.unsavedIDs(key)
+                    let items = unsaved.isEmpty ? [] : FolderScanner.scan(root: folder) { _ in }.filter { unsaved.contains($0.id) }
+                    return (folder, key, items)
+                }
+            }.value
+            for (folder, key, items) in leftovers {
+                guard !items.isEmpty else {
+                    ImportStore.remove(folder)
+                    ProgressStore.clear(key)
+                    continue
+                }
+                for item in items { _ = saves.enqueue(item, to: destination, sourceKey: key) }
+                saves.flush {
+                    ImportStore.remove(folder)
+                    ProgressStore.clear(key)
+                }
+            }
+        }
+    }
+
+    /// 決定要存、但還沒真正寫入的相片。
+    nonisolated private static func unsavedIDs(_ key: String) -> Set<String> {
+        ProgressStore.migrateSavedRecord(key)
+        let saved = ProgressStore.loadSaved(key)
+        return Set(ProgressStore.load(key).filter { $0.value == .save && !saved.contains($0.key) }.map(\.key))
     }
 
     // MARK: - 目前狀態
@@ -72,44 +112,37 @@ final class SessionModel: ObservableObject {
     // MARK: - 來源（記憶卡）
 
     func chooseSource() {
-        FolderPicker.shared.presentSource { [weak self] urls in self?.openPicked(urls) }
+        FolderPicker.shared.presentSource { [weak self] urls in self?.importCopies(urls) }
     }
 
-    /// 選擇器可能回傳一個資料夾，或使用者勾選的多張相片。
-    private func openPicked(_ urls: [URL]) {
-        let folders = urls.filter(isFolder)
-        if let folder = folders.first, folders.count == urls.count {
-            open(folder)
-        } else {
-            openFiles(urls.filter { !isFolder($0) })
-        }
-    }
-
-    private func isFolder(_ url: URL) -> Bool {
-        if url.hasDirectoryPath { return true }
-        let ok = url.startAccessingSecurityScopedResource()
-        defer { if ok { url.stopAccessingSecurityScopedResource() } }
-        return (try? url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true
-    }
-
-    /// 開啟直接勾選的相片（不經過資料夾）。
-    private func openFiles(_ files: [URL]) {
-        guard !files.isEmpty else { return }
+    /// 系統選擇器已經把勾選的相片複製進 App 的暫存區；搬到 App 自己的「匯入」資料夾再開始挑。
+    /// iPadOS 16 直接讀取外接記憶卡上的檔案會卡住，先複製進來最可靠。
+    private func importCopies(_ urls: [URL]) {
+        let photos = urls.filter(FileTypes.isPhoto)
+        guard !photos.isEmpty else { return }
         saves.flush()
         showDestinations = false
-        replaceAccess(with: files)
-
-        let folder = files[0].deletingLastPathComponent()
-        sourceName = Self.cardName(for: folder)
-        sourceKey = ProgressStore.key(for: folder)
-        loadingCount = files.count
+        sourceName = Self.importName
+        loadingCount = photos.count
         withAnimation(.easeInOut(duration: 0.25)) { phase = .loading }
 
         Task.detached(priority: .userInitiated) { [weak self] in
-            let found = FolderScanner.items(from: files)
-            await self?.finishLoading(found)
+            let folder = ImportStore.store(photos)
+            await self?.finishImport(folder)
         }
     }
+
+    private func finishImport(_ folder: URL?) {
+        guard let folder else {
+            withAnimation { phase = .start }
+            alert = AlertInfo(title: "無法讀取相片", message: "請確認 iPad 還有足夠的儲存空間，再重新選擇一次。")
+            return
+        }
+        open(folder, name: Self.importName)
+        cleanupImports(keep: folder)
+    }
+
+    private static let importName = "記憶卡"
 
     /// 取得新來源的存取權；舊來源可能還有相片正在寫入，稍後再釋放。
     private func replaceAccess(with urls: [URL]) {
@@ -141,10 +174,10 @@ final class SessionModel: ObservableObject {
             alert = AlertInfo(title: "找不到「\(last.name)」", message: "請確認記憶卡已經接上 iPad，或重新選擇記憶卡。")
             return
         }
-        open(url)
+        open(url, name: last.name)
     }
 
-    func open(_ url: URL) {
+    func open(_ url: URL, name customName: String? = nil) {
         saves.flush()
         showDestinations = false
 
@@ -156,8 +189,8 @@ final class SessionModel: ObservableObject {
             return
         }
 
-        let name = url.lastPathComponent.uppercased() == "DCIM" ? url.deletingLastPathComponent().lastPathComponent
-            : Self.cardName(for: url)
+        let name = customName ?? (url.lastPathComponent.uppercased() == "DCIM"
+            ? url.deletingLastPathComponent().lastPathComponent : Self.cardName(for: url))
         sourceName = name
         if let bookmark = try? url.bookmarkData() {
             lastSource = LastSource(name: name, bookmark: bookmark)
@@ -179,12 +212,17 @@ final class SessionModel: ObservableObject {
         guard !found.isEmpty else {
             withAnimation { phase = .start }
             alert = AlertInfo(title: "找不到相片",
-                              message: "「\(sourceName)」裡沒有 JPG、HEIC 或 RAW 相片。請確認選的是記憶卡或卡上的 DCIM 資料夾。")
+                              message: "選擇的項目裡沒有 JPG、HEIC 或 RAW 相片。")
             return
         }
         items = found
         decisions = ProgressStore.load(sourceKey)
         recount()
+        // 上次右滑了、但 App 被關掉而沒存到的相片，排回去等下次寫入。
+        let unsaved = Self.unsavedIDs(sourceKey)
+        for item in found where unsaved.contains(item.id) {
+            _ = saves.enqueue(item, to: destination, sourceKey: sourceKey)
+        }
         history = []
         reviewingSkipped = false
         queue = found.indices.filter { decisions[found[$0].id] == nil }
@@ -219,7 +257,7 @@ final class SessionModel: ObservableObject {
 
         var jobID: UUID?
         if decision == .save {
-            jobID = saves.enqueue(item, to: destination)
+            jobID = saves.enqueue(item, to: destination, sourceKey: sourceKey)
         }
         history.append(HistoryEntry(position: position, itemID: item.id, itemName: item.displayName,
                                     decision: decision, jobID: jobID))
@@ -236,7 +274,6 @@ final class SessionModel: ObservableObject {
         withAnimation(.spring(response: 0.38, dampingFraction: 0.86)) { position += 1 }
 
         if position >= queue.count {
-            saves.flush()
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.32) { [weak self] in
                 guard let self, self.position >= self.queue.count, self.phase == .deck else { return }
                 withAnimation(.easeInOut(duration: 0.3)) { self.phase = .done }
