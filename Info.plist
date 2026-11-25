@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>zh-Hant</string>
+	<key>CFBundleLocalizations</key>
+	<array>
+		<string>zh-Hant</string>
+	</array>
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>CardPick 會把你右滑的相片存進「照片」，並列出相簿讓你選擇要存到哪裡。</string>
+	<key>NSPhotoLibraryAddUsageDescription</key>
+	<string>CardPick 會把你右滑的相片存進「照片」。</string>
+</dict>
+</plist>
